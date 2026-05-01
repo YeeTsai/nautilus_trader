@@ -1213,11 +1213,13 @@ class LiveExecutionEngine(ExecutionEngine):
                     cached_fill_trade_ids.add(event.trade_id)
 
         # Find missing fills (not in cache and not in recent fills cache)
+        # Also filter by instrument_id — some adapters may return fills for other instruments
         missing_fills = [
             fill
             for fill in venue_fills
             if fill.trade_id not in cached_fill_trade_ids
             and fill.trade_id not in self._recent_fills_cache
+            and fill.instrument_id == instrument_id
         ]
 
         return missing_fills, had_fill_query_errors
@@ -1237,6 +1239,15 @@ class LiveExecutionEngine(ExecutionEngine):
 
         for fill_report in missing_fills:
             try:
+                self._log.info(
+                    f"[FILL-TRACE] Reconciling fill: "
+                    f"trade_id={fill_report.trade_id} "
+                    f"venue_order_id={fill_report.venue_order_id} "
+                    f"client_order_id={fill_report.client_order_id} "
+                    f"instrument={instrument_id} "
+                    f"qty={fill_report.last_qty} px={fill_report.last_px} "
+                    f"position_id={fill_report.venue_position_id}",
+                )
                 result = self._reconcile_fill_report_single(fill_report)
                 if result:
                     self._position_local_activity_ns[instrument_id] = self._clock.timestamp_ns()
@@ -2329,24 +2340,14 @@ class LiveExecutionEngine(ExecutionEngine):
             LogColor.BLUE,
         )
 
+        # Try exact match first (works for single-strategy or venue-format positions)
         position: Position | None = self._cache.position(report.venue_position_id)
 
-        if position is None:
-            if report.signed_decimal_qty == 0:
-                return True  # Both flat, no issue
-
-            if not self.generate_missing_orders:
-                self._log.error(
-                    f"Cannot reconcile position: {report.venue_position_id!r} not found "
-                    "and `generate_missing_orders` is disabled",
-                )
-                return False
-
-            return self._reconcile_missing_hedge_position(report)
-
-        position_signed_decimal_qty: Decimal = position.signed_decimal_qty()
-
-        if position_signed_decimal_qty != report.signed_decimal_qty:
+        if position is not None:
+            # Exact match found — use original reconciliation logic
+            position_signed_decimal_qty: Decimal = position.signed_decimal_qty()
+            if position_signed_decimal_qty == report.signed_decimal_qty:
+                return True  # Reconciled
             if not self.generate_missing_orders:
                 self._log.error(
                     f"Cannot reconcile {report.instrument_id} {report.venue_position_id!r}: "
@@ -2354,14 +2355,77 @@ class LiveExecutionEngine(ExecutionEngine):
                     f"{report.signed_decimal_qty} and `generate_missing_orders` is disabled",
                 )
                 return False
-
             return self._reconcile_hedge_position_discrepancy(
                 report=report,
                 position=position,
                 position_signed_decimal_qty=position_signed_decimal_qty,
             )
 
-        return True  # Reconciled
+        # No exact match — try aggregating per-strategy positions (multi-strategy hedge mode)
+        # Per-strategy positions have format: {instrument_id}-{tag}-{LONG/SHORT}
+        # Venue position_id has format: {instrument_id}-{LONG/SHORT}
+        venue_pos_str = str(report.venue_position_id)
+        if venue_pos_str.endswith("-LONG"):
+            side_suffix = "-LONG"
+        elif venue_pos_str.endswith("-SHORT"):
+            side_suffix = "-SHORT"
+        else:
+            # Unknown format — fall back to original missing position logic
+            if report.signed_decimal_qty == 0:
+                return True
+            if not self.generate_missing_orders:
+                self._log.error(
+                    f"Cannot reconcile position: {report.venue_position_id!r} not found "
+                    "and `generate_missing_orders` is disabled",
+                )
+                return False
+            return self._reconcile_missing_hedge_position(report)
+
+        # Aggregate all open positions for this instrument + side
+        matching_positions = [
+            p for p in self._cache.positions_open()
+            if str(p.instrument_id) == str(report.instrument_id)
+            and str(p.id).endswith(side_suffix)
+        ]
+
+        aggregate_qty = sum(p.signed_decimal_qty() for p in matching_positions)
+
+        self._log.info(
+            f"[POS-CHECK] {report.instrument_id} {side_suffix}: "
+            f"venue={report.signed_decimal_qty}, "
+            f"cache_aggregate={aggregate_qty}, "
+            f"positions={[(str(p.id), str(p.signed_decimal_qty())) for p in matching_positions]}, "
+            f"match={'Y' if aggregate_qty == report.signed_decimal_qty else 'N'}",
+            LogColor.BLUE,
+        )
+
+        if aggregate_qty == report.signed_decimal_qty:
+            return True  # Aggregated positions match venue
+
+        if report.signed_decimal_qty == 0 and aggregate_qty == 0:
+            return True  # Both flat
+
+        # Discrepancy exists between aggregate and venue
+        if not matching_positions and report.signed_decimal_qty != 0:
+            # No per-strategy positions found, venue has position
+            if not self.generate_missing_orders:
+                self._log.warning(
+                    f"No matching positions for {report.instrument_id} {side_suffix}, "
+                    f"venue={report.signed_decimal_qty}; "
+                    f"`generate_missing_orders` disabled, skipping",
+                )
+                return True  # Don't block startup
+            return self._reconcile_missing_hedge_position(report)
+
+        # Per-strategy positions exist but aggregate doesn't match venue
+        # Log warning but don't create phantom positions — PositionSyncChecker handles per-strategy correction
+        self._log.warning(
+            f"Hedge position discrepancy for {report.instrument_id} {side_suffix}: "
+            f"cache_aggregate={aggregate_qty}, venue={report.signed_decimal_qty}, "
+            f"diff={abs(aggregate_qty - report.signed_decimal_qty)}. "
+            f"Per-strategy positions: {[str(p.id) for p in matching_positions]}",
+        )
+        return True  # Don't block startup — continuous position_check will handle
 
     def _reconcile_hedge_position_discrepancy(
         self,
