@@ -415,6 +415,11 @@ class BinanceFuturesInstrumentProvider(InstrumentProvider):
             else:
                 raise ValueError(f"Unrecognized margin asset {symbol_info.marginAsset}")
 
+            # COIN-M (delivery) contracts are inverse: margin in base asset (e.g. BTC)
+            is_inverse = symbol_info.marginAsset == symbol_info.baseAsset
+            # contractSize from exchange info (COIN-M only, e.g. 100 USD per contract)
+            multiplier = Quantity.from_int(symbol_info.contractSize) if symbol_info.contractSize else Quantity.from_int(1)
+
             contract_type = BinanceFuturesContractType(contract_type_str)
             if contract_type in (
                 BinanceFuturesContractType.PERPETUAL,
@@ -427,7 +432,8 @@ class BinanceFuturesInstrumentProvider(InstrumentProvider):
                     base_currency=base_currency,
                     quote_currency=quote_currency,
                     settlement_currency=settlement_currency,
-                    is_inverse=False,  # No inverse instruments trade on Binance
+                    is_inverse=is_inverse,
+                    multiplier=multiplier,
                     price_precision=price_precision,
                     size_precision=size_precision,
                     price_increment=price_increment,
@@ -460,7 +466,8 @@ class BinanceFuturesInstrumentProvider(InstrumentProvider):
                     underlying=base_currency,
                     quote_currency=quote_currency,
                     settlement_currency=settlement_currency,
-                    is_inverse=False,  # No inverse instruments trade on Binance
+                    is_inverse=is_inverse,
+                    multiplier=multiplier,
                     activation_ns=millis_to_nanos(symbol_info.onboardDate),
                     expiration_ns=millis_to_nanos(symbol_info.deliveryDate),
                     price_precision=price_precision,

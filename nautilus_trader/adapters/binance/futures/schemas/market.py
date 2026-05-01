@@ -76,6 +76,7 @@ class BinanceFuturesSymbolInfo(msgspec.Struct, kw_only=True, frozen=True):
     triggerProtect: str
     liquidationFee: str
     marketTakeBound: str
+    contractSize: int | None = None  # COIN-M only (e.g. 100 for BTCUSD_PERP)
     filters: list[BinanceSymbolFilter]
     orderTypes: list[BinanceOrderType]
     timeInForce: list[BinanceTimeInForce]
