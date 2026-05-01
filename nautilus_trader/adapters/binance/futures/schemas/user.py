@@ -53,6 +53,21 @@ from nautilus_trader.model.objects import Quantity
 from nautilus_trader.model.orders import Order
 
 
+def _extract_order_id_tag(client_order_id: str) -> str | None:
+    """Extract order_id_tag from a Nautilus client_order_id.
+
+    Format: O-{date}-{time}-{trader_tag}-{order_id_tag}-{seq}
+    Example: O-20260326-054700-767-7d5-1 -> '7d5'
+
+    Returns None for exchange-generated IDs (autoclose-, adl_autoclose, etc.)
+    or client_order_ids with unexpected formats.
+    """
+    parts = client_order_id.split("-")
+    if len(parts) >= 6 and parts[0] == "O":
+        return parts[-2]
+    return None
+
+
 class BinanceFuturesUserMsgData(msgspec.Struct, frozen=True):
     """
     Inner struct for execution WebSocket messages from Binance.
@@ -568,7 +583,19 @@ class BinanceFuturesOrderData(msgspec.Struct, kw_only=True, frozen=True):
             venue_position_id: PositionId | None = None
 
             if exec_client.use_position_ids:
-                venue_position_id = PositionId(f"{instrument_id}-{self.ps.value}")
+                tag = _extract_order_id_tag(str(client_order_id)) if client_order_id else None
+                if tag:
+                    venue_position_id = PositionId(f"{instrument_id}-{tag}-{self.ps.value}")
+                else:
+                    venue_position_id = PositionId(f"{instrument_id}-{self.ps.value}")
+
+            exec_client._log.info(
+                f"[FILL-TRACE] ORDER_TRADE_UPDATE: "
+                f"coid={client_order_id} trade_id={self.t} "
+                f"instrument={instrument_id} side={self.S} "
+                f"qty={self.l} px={self.L} pos_side={self.ps.value} "
+                f"pos_id={venue_position_id}",
+            )
 
             # Liquidations are always taker, regular trades use the 'm' field
             liquidity_side = (
@@ -593,6 +620,11 @@ class BinanceFuturesOrderData(msgspec.Struct, kw_only=True, frozen=True):
                 liquidity_side=liquidity_side,
                 ts_event=ts_event,
             )
+
+            # Track fill for algo order dedup (prevents synthetic fill race)
+            if client_order_id is not None and hasattr(exec_client, "_algo_order_fills_received"):
+                exec_client._algo_order_fills_received.add(str(client_order_id))
+
         elif self.x == BinanceExecutionType.CANCELED or (
             exec_client.treat_expired_as_canceled and self.x == BinanceExecutionType.EXPIRED
         ):
@@ -988,7 +1020,11 @@ class BinanceFuturesAlgoOrderData(msgspec.Struct, kw_only=True, frozen=True):
         venue_position_id: PositionId | None = None
 
         if exec_client.use_position_ids:
-            venue_position_id = PositionId(f"{instrument_id}-{self.ps.value}")
+            tag = _extract_order_id_tag(str(client_order_id)) if client_order_id else None
+            if tag:
+                venue_position_id = PositionId(f"{instrument_id}-{tag}-{self.ps.value}")
+            else:
+                venue_position_id = PositionId(f"{instrument_id}-{self.ps.value}")
 
         exec_client.generate_order_filled(
             strategy_id=strategy_id,
@@ -1033,38 +1069,52 @@ class BinanceFuturesAlgoOrderData(msgspec.Struct, kw_only=True, frozen=True):
             return
 
         if order_status == OrderStatus.FILLED and order.is_open:
-            # Missed ORDER_TRADE_UPDATE - emit synthetic fill to close order
-            exec_client._log.warning(
-                f"Algo order {client_order_id} FINISHED with full fill "
-                f"but order still open - emitting synthetic fill",
-            )
-            remaining_qty = order.quantity - order.filled_qty
+            coid_str = str(client_order_id)
+            fills_received = getattr(exec_client, "_algo_order_fills_received", set())
 
-            if avg_px is not None:
-                self._emit_synthetic_fill(
-                    exec_client,
-                    order,
-                    strategy_id,
-                    instrument_id,
-                    client_order_id,
-                    venue_order_id,
-                    remaining_qty,
-                    avg_px,
-                    ts_event,
+            if coid_str in fills_received:
+                # ORDER_TRADE_UPDATE already delivered a real fill for this order.
+                # The order appears "open" only because ExecEngine hasn't processed
+                # the fill event yet (async queue). Skip synthetic fill to avoid
+                # overfill rejection and position discrepancy.
+                fills_received.discard(coid_str)
+                exec_client._log.info(
+                    f"Algo order {client_order_id} FINISHED - "
+                    f"real fill already received via ORDER_TRADE_UPDATE, "
+                    f"skipping synthetic fill",
                 )
             else:
-                # No avg price - emit cancel to close order, manual reconciliation needed
-                exec_client._log.error(
-                    f"Algo order {client_order_id} FINISHED as filled but no avg price - "
-                    f"emitting cancel, manual PnL reconciliation required",
+                # ORDER_TRADE_UPDATE was genuinely missed — emit synthetic fill
+                exec_client._log.warning(
+                    f"Algo order {client_order_id} FINISHED with full fill "
+                    f"but no ORDER_TRADE_UPDATE received - emitting synthetic fill",
                 )
-                exec_client.generate_order_canceled(
-                    strategy_id=strategy_id,
-                    instrument_id=instrument_id,
-                    client_order_id=client_order_id,
-                    venue_order_id=venue_order_id,
-                    ts_event=ts_event,
-                )
+                remaining_qty = order.quantity - order.filled_qty
+                if avg_px is not None:
+                    self._emit_synthetic_fill(
+                        exec_client,
+                        order,
+                        strategy_id,
+                        instrument_id,
+                        client_order_id,
+                        venue_order_id,
+                        remaining_qty,
+                        avg_px,
+                        ts_event,
+                    )
+                else:
+                    # No avg price - emit cancel to close order, manual reconciliation needed
+                    exec_client._log.error(
+                        f"Algo order {client_order_id} FINISHED as filled but no avg price - "
+                        f"emitting cancel, manual PnL reconciliation required",
+                    )
+                    exec_client.generate_order_canceled(
+                        strategy_id=strategy_id,
+                        instrument_id=instrument_id,
+                        client_order_id=client_order_id,
+                        venue_order_id=venue_order_id,
+                        ts_event=ts_event,
+                    )
         elif order_status == OrderStatus.PARTIALLY_FILLED:
             # Partial fill then canceled - reconcile missing fills if needed
             if order.is_open and filled_qty > order.filled_qty and avg_px is not None:

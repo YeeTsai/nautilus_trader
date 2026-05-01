@@ -162,6 +162,10 @@ class BinanceFuturesExecutionClient(BinanceCommonExecutionClient):
             BinanceFuturesEventType.ALGO_UPDATE: self._handle_algo_update,
         }
 
+        # Track algo orders that received real fills via ORDER_TRADE_UPDATE.
+        # Used by _handle_algo_finished to avoid emitting duplicate synthetic fills.
+        self._algo_order_fills_received: set[str] = set()
+
         self._use_trade_lite = config.use_trade_lite
         if self._use_trade_lite:
             self._log.info("TRADE_LITE events will be used", LogColor.BLUE)
