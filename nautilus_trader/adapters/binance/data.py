@@ -275,8 +275,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
                         break
 
                     self._log.warning(
-                        f"{error_code.name}: retrying update instruments "
-                        f"{retries}/{self._max_retries} in {self._retry_delay}s",
+                        f"{error_code.name}: retrying update instruments {retries}/{self._max_retries} in {self._retry_delay}s",
                     )
                     await asyncio.sleep(self._retry_delay)
                 except asyncio.CancelledError:
@@ -326,8 +325,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
         elif command.data_type.type == BinanceFuturesMarkPriceUpdate:
             if not self._binance_account_type.is_futures:
                 self._log.error(
-                    "Cannot subscribe to `BinanceFuturesMarkPriceUpdate` "
-                    f"for {self._binance_account_type.value} account types",
+                    f"Cannot subscribe to `BinanceFuturesMarkPriceUpdate` for {self._binance_account_type.value} account types",
                 )
                 return
             mark_price_symbol = instrument_id.symbol.value if instrument_id else None
@@ -354,8 +352,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
         elif command.data_type.type == BinanceFuturesMarkPriceUpdate:
             if not self._binance_account_type.is_futures:
                 self._log.error(
-                    "Cannot unsubscribe from `BinanceFuturesMarkPriceUpdate` "
-                    f"for {self._binance_account_type.value} account types",
+                    f"Cannot unsubscribe from `BinanceFuturesMarkPriceUpdate` for {self._binance_account_type.value} account types",
                 )
                 return
         else:
@@ -377,9 +374,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
 
         if command.book_type == BookType.L3_MBO:
             self._log.error(
-                "Cannot subscribe to order book deltas: "
-                "L3_MBO data is not published by Binance. "
-                "Valid book types are L1_MBP, L2_MBP",
+                "Cannot subscribe to order book deltas: L3_MBO data is not published by Binance. Valid book types are L1_MBP, L2_MBP",
             )
             return
 
@@ -393,9 +388,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
             update_speed = 100  # Default 100ms for spot
         if update_speed not in valid_speeds:
             self._log.error(
-                "Cannot subscribe to order book:"
-                f"invalid `update_speed`, was {update_speed}. "
-                f"Valid update speeds are {valid_speeds} ms",
+                f"Cannot subscribe to order book:invalid `update_speed`, was {update_speed}. Valid update speeds are {valid_speeds} ms",
             )
             return
 
@@ -408,9 +401,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
         if 0 < depth <= 20:
             if depth not in (5, 10, 20):
                 self._log.error(
-                    "Cannot subscribe to order book snapshots: "
-                    f"invalid `depth`, was {depth}. "
-                    "Valid depths are 5, 10, or 20",
+                    f"Cannot subscribe to order book snapshots: invalid `depth`, was {depth}. Valid depths are 5, 10, or 20",
                 )
                 return
             await self._ws_public_client.subscribe_partial_book_depth(
@@ -489,8 +480,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
 
         if self._binance_account_type.is_futures and resolution == "s":
             self._log.error(
-                f"Cannot subscribe to {command.bar_type}. "
-                "Second interval bars are not aggregated by Binance Futures",
+                f"Cannot subscribe to {command.bar_type}. Second interval bars are not aggregated by Binance Futures",
             )
         try:
             interval = BinanceKlineInterval(f"{command.bar_type.spec.step}{resolution}")
@@ -536,8 +526,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
 
         if self._binance_account_type.is_futures and resolution == "s":
             self._log.error(
-                f"Cannot unsubscribe from {command.bar_type}. "
-                "Second interval bars are not aggregated by Binance Futures",
+                f"Cannot unsubscribe from {command.bar_type}. Second interval bars are not aggregated by Binance Futures",
             )
         try:
             interval = BinanceKlineInterval(f"{command.bar_type.spec.step}{resolution}")
@@ -619,8 +608,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
     async def _request_bars(self, request: RequestBars) -> None:
         if request.bar_type.spec.price_type != PriceType.LAST:
             self._log.error(
-                f"Cannot request {request.bar_type} bars: "
-                f"only historical bars for LAST price type available from Binance",
+                f"Cannot request {request.bar_type} bars: only historical bars for LAST price type available from Binance",
             )
             return
 
@@ -643,15 +631,13 @@ class BinanceCommonDataClient(LiveMarketDataClient):
 
             if not self._binance_account_type.is_spot_or_margin and resolution == "s":
                 self._log.error(
-                    f"Cannot request {request.bar_type} bars: "
-                    "second interval bars are not aggregated by Binance Futures",
+                    f"Cannot request {request.bar_type} bars: second interval bars are not aggregated by Binance Futures",
                 )
             try:
                 interval = BinanceKlineInterval(f"{request.bar_type.spec.step}{resolution}")
             except ValueError:
                 self._log.error(
-                    f"Cannot create Binance Kline interval. {request.bar_type.spec.step}{resolution} "
-                    "not supported",
+                    f"Cannot create Binance Kline interval. {request.bar_type.spec.step}{resolution} not supported",
                 )
                 return
 
@@ -685,8 +671,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
 
         if not bars:
             self._log.warning(
-                f"No bars returned for {request.bar_type} between "
-                f"{request.start} and {request.end}",
+                f"No bars returned for {request.bar_type} between {request.start} and {request.end}",
             )
             return
 
@@ -713,9 +698,7 @@ class BinanceCommonDataClient(LiveMarketDataClient):
     async def _request_order_book_snapshot(self, request: RequestOrderBookSnapshot) -> None:
         if request.limit not in [5, 10, 20, 50, 100, 500, 1000]:
             self._log.error(
-                "Cannot get order book snapshots: "
-                f"invalid `limit`, was {request.limit}. "
-                "Valid limits are 5, 10, 20, 50, 100, 500 or 1000",
+                f"Cannot get order book snapshots: invalid `limit`, was {request.limit}. Valid limits are 5, 10, 20, 50, 100, 500 or 1000",
             )
             return
         else:
