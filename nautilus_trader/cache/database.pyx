@@ -1047,6 +1047,9 @@ cdef class CacheDatabaseAdapter(CacheDatabaseFacade):
         cdef bytes position_id_bytes = position_id_str.encode()
         self._backing.insert(_INDEX_POSITIONS, [position_id_bytes])
         self._backing.insert(_INDEX_POSITIONS_OPEN, [position_id_bytes])
+        # Remove from closed index — needed for HEDGING mode position reopen
+        # (cache.add_position() does this in memory via _index_positions_closed.discard())
+        self._backing.delete(_INDEX_POSITIONS_CLOSED, [position_id_bytes])
 
         self._log.debug(f"Added {position}")
 
