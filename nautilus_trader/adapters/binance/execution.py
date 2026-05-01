@@ -609,15 +609,22 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         self._log.debug("Requesting FillReports...")
 
         try:
-            # Check Binance for all trades on active symbols
-            symbol = (
+            # Determine which symbols to query
+            requested_symbol = (
                 command.instrument_id.symbol.value if command.instrument_id is not None else None
             )
-            active_symbols = self._get_cache_active_symbols()
-            active_symbols.update(await self._get_binance_active_position_symbols(symbol))
+            if requested_symbol is not None:
+                # Specific instrument requested — only query that symbol
+                symbols_to_query = {requested_symbol}
+            else:
+                # No filter — query all active symbols (startup mass status)
+                symbols_to_query = self._get_cache_active_symbols()
+                symbols_to_query.update(
+                    await self._get_binance_active_position_symbols(None),
+                )
             binance_trades: list[BinanceUserTrade] = []
 
-            for symbol in active_symbols:
+            for symbol in symbols_to_query:
                 response = await self._http_account.query_user_trades(
                     symbol=symbol,
                     start_time=(
