@@ -153,10 +153,13 @@ impl WebSocketClient {
 
         let post_reconnection_fn = post_reconnection.map(|callback| {
             let callback_clone = clone_py_object(&callback);
+            let call_soon_clone = clone_py_object(&call_soon_threadsafe);
             Arc::new(move || {
                 Python::attach(|py| {
-                    if let Err(e) = callback_clone.call0(py) {
-                        log::error!("Error calling post_reconnection handler: {e}");
+                    if let Err(e) = call_soon_clone.call1(py, (&callback_clone,)) {
+                        log::error!(
+                            "Error scheduling post_reconnection handler on event loop: {e}",
+                        );
                     }
                 });
             }) as std::sync::Arc<dyn Fn() + Send + Sync>
