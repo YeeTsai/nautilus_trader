@@ -58,6 +58,7 @@ class BinanceFuturesContractStatus(Enum):
 
     PENDING_TRADING = "PENDING_TRADING"
     TRADING = "TRADING"
+    TRADING_HALT = "TRADING_HALT"  # Binance halts an active contract (e.g. CRCL/MSTR maintenance)
     PRE_DELIVERING = "PRE_DELIVERING"
     DELIVERING = "DELIVERING"
     DELIVERED = "DELIVERED"
