@@ -26,6 +26,7 @@ from nautilus_trader.model.enums import LiquiditySide
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.identifiers import ClientOrderId
+from nautilus_trader.model.identifiers import PositionId
 from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import VenueOrderId
 from nautilus_trader.model.objects import Price
@@ -723,6 +724,81 @@ class TestBinanceFuturesExecutionHandlers:
         status_idx = exec_client.mock_calls.index(status_call)
         fill_idx = exec_client.mock_calls.index(fill_call)
         assert status_idx < fill_idx, "OrderStatusReport must be sent before FillReport"
+
+    def test_liquidation_seed_report_carries_venue_position_id(self, mocker):
+        """
+        Regression: the seed OrderStatusReport for an exchange-generated
+        liquidation order must carry the same venue_position_id as the
+        FillReport that follows it. Without it the engine's inferred fill
+        falls back to ``{instrument}-EXTERNAL`` and, under hedge mode,
+        opens a phantom position on the opposite side.
+
+        yeslab bug doc: docs/bugs/apps/execution-engine/
+        2026-08-28-oms-phantom-short-survives-self-heal/bug.md
+        """
+        # Arrange
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_liquidation.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        exec_client = mocker.MagicMock()
+        exec_client.account_id = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = None
+        exec_client._get_cached_instrument_id.return_value = BTCUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = BTCUSDT_BINANCE
+        exec_client._enum_parser.parse_binance_order_side.return_value = OrderSide.SELL
+        exec_client._clock.timestamp_ns.return_value = 1759347763167000000
+        exec_client.use_position_ids = True
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert
+        expected = PositionId(f"{BTCUSDT_BINANCE.id}-LONG")  # fixture ps=LONG
+        order_report = exec_client._send_order_status_report.call_args[0][0]
+        fill_report = exec_client._send_fill_report.call_args[0][0]
+        assert fill_report.venue_position_id == expected
+        assert order_report.venue_position_id == expected
+
+    def test_unclaimed_venue_order_seed_report_carries_venue_position_id(self, mocker):
+        """
+        Regression: a venue-side manual order (no strategy_id, not a
+        liquidation) is reported via OrderStatusReport only; that report
+        must carry venue_position_id for the same reason as the
+        liquidation seed report (same yeslab bug doc).
+        """
+        # Arrange: reuse the liquidation fixture, rewrite it into a manual
+        # market close (web_ coid, TRADE execution type).
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_liquidation.json",
+        )
+        msg = json.loads(raw)
+        msg["data"]["o"]["c"] = "web_manual_close_1"
+        msg["data"]["o"]["x"] = "TRADE"
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(json.dumps(msg).encode())
+
+        exec_client = mocker.MagicMock()
+        exec_client.account_id = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = None
+        exec_client._get_cached_instrument_id.return_value = BTCUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = BTCUSDT_BINANCE
+        exec_client._clock.timestamp_ns.return_value = 1759347763167000000
+        exec_client.use_position_ids = True
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert
+        exec_client._send_order_status_report.assert_called_once()
+        report = exec_client._send_order_status_report.call_args[0][0]
+        assert report.client_order_id == ClientOrderId("web_manual_close_1")
+        assert report.venue_position_id == PositionId(f"{BTCUSDT_BINANCE.id}-LONG")
+        exec_client._send_fill_report.assert_not_called()
 
     def test_new_execution_limit_order_price_match_generates_order_updated(self, mocker):
         # Arrange

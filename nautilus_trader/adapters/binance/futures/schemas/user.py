@@ -335,6 +335,14 @@ class BinanceFuturesOrderData(msgspec.Struct, kw_only=True, frozen=True):
                 ts_init=exec_client._clock.timestamp_ns(),
                 enum_parser=exec_client._enum_parser,
             )
+
+            # Without a venue_position_id the engine's inferred fill falls back to
+            # `{instrument}-EXTERNAL`, which under hedge mode opens a new position
+            # on the opposite side instead of reducing the existing one.
+            if exec_client.use_position_ids:
+                report.venue_position_id = PositionId(
+                    f"{instrument_id}-{self.ps.value}",
+                )
             exec_client._send_order_status_report(report)
             return
 
@@ -399,6 +407,16 @@ class BinanceFuturesOrderData(msgspec.Struct, kw_only=True, frozen=True):
                 ts_init=exec_client._clock.timestamp_ns(),
                 enum_parser=exec_client._enum_parser,
             )
+
+            # The seed report must carry the same venue_position_id as the
+            # FillReport below: the engine generates an inferred fill from it
+            # (the FillReport is then deduplicated), and without the side that
+            # fill falls back to `{instrument}-EXTERNAL` and opens an opposite
+            # side position under hedge mode.
+            if exec_client.use_position_ids:
+                order_report.venue_position_id = PositionId(
+                    f"{instrument_id}-{self.ps.value}",
+                )
             exec_client._send_order_status_report(order_report)
 
             # Generate fill report directly for exchange-generated liquidation/ADL
