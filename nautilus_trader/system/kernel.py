@@ -20,6 +20,7 @@ import signal
 import socket
 import sys
 import time
+import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -35,6 +36,7 @@ from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.component import Clock
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import Logger
+from nautilus_trader.common.component import LoggingReinitError
 from nautilus_trader.common.component import LogGuard
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.common.component import TestClock
@@ -96,6 +98,36 @@ except ImportError:  # pragma: no cover
 # pytest-asyncio manages the event loop policy for tests via event_loop_policy fixture.
 if uvloop is not None and "pytest" not in sys.modules:
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+
+_LOGGING_REINIT_WARNED = False
+
+
+def _init_logging_or_degrade(**kwargs) -> LogGuard | None:
+    """
+    Initialize logging, or return `None` if this process can no longer do so.
+
+    Logging can only be armed once per process: the `log` crate's global logger
+    cannot be replaced, so a kernel built after an earlier kernel's `LogGuard`
+    was dropped runs without logging instead of aborting. The fact is reported
+    once per process via an explicit flag -- `warnings` de-duplicates on
+    (message, category, module, lineno) and is defeated by
+    `simplefilter("always")`, so it cannot carry that promise itself.
+    """
+    global _LOGGING_REINIT_WARNED
+
+    try:
+        return init_logging(**kwargs)
+    except LoggingReinitError as e:
+        if not _LOGGING_REINIT_WARNED:
+            _LOGGING_REINIT_WARNED = True
+            warnings.warn(
+                f"Logging is disabled for this kernel and every later one in "
+                f"this process: {e}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return None
 
 
 class NautilusKernel:
@@ -225,8 +257,11 @@ class NautilusKernel:
                 else:
                     set_logging_pyo3(False)
 
-                    # Initialize logging for sync Rust and Python
-                    self._log_guard = init_logging(
+                    # Initialize logging for sync Rust and Python.
+                    # A second kernel in a process whose LogGuard was already
+                    # dropped cannot re-arm logging; it runs without a guard
+                    # rather than aborting (see LoggingReinitError).
+                    self._log_guard = _init_logging_or_degrade(
                         trader_id=self._trader_id,
                         machine_id=self._machine_id,
                         instance_id=self._instance_id,
@@ -247,12 +282,13 @@ class NautilusKernel:
                         max_file_size=logging.log_file_max_size or 0,
                         max_backup_count=logging.log_file_max_backup_count,
                     )
-                    log_header(
-                        trader_id=self._trader_id,
-                        machine_id=self._machine_id,
-                        instance_id=self._instance_id,
-                        component=name,
-                    )
+                    if self._log_guard is not None:
+                        log_header(
+                            trader_id=self._trader_id,
+                            machine_id=self._machine_id,
+                            instance_id=self._instance_id,
+                            component=name,
+                        )
             elif self._environment == Environment.LIVE:
                 raise InvalidConfiguration(
                     "`LoggingConfig.bypass_logging` was set `True` "

@@ -1200,6 +1200,17 @@ cpdef str log_level_to_str(LogLevel value):
     return cstr_to_pystr(log_level_to_cstr(value))
 
 
+class LoggingReinitError(RuntimeError):
+    """
+    Raised when the logging subsystem cannot be re-initialized in this process.
+
+    The `log` crate installs a process-global logger which can never be
+    replaced, while the initialization flag is reset when the last `LogGuard`
+    is dropped. A process that has dropped its guard therefore reports itself
+    uninitialized but can no longer be initialized.
+    """
+
+
 cdef class LogGuard:
     """
     Provides a `LogGuard` which serves as a token to signal the initialization
@@ -1286,6 +1297,9 @@ cpdef LogGuard init_logging(
     ------
     RuntimeError
         If the logging subsystem has already been initialized.
+    LoggingReinitError
+        If a previous `LogGuard` was dropped: the process-global logger cannot
+        be replaced, so logging can never be initialized again.
 
     """
     if trader_id is None:
@@ -1314,6 +1328,13 @@ cpdef LogGuard init_logging(
         max_file_size,
         max_backup_count,
     )
+
+    if log_guard_api._0 == NULL:
+        raise LoggingReinitError(
+            "Logging subsystem cannot be re-initialized in this process: "
+            "a previous LogGuard was dropped and the log crate's global logger "
+            "cannot be replaced",
+        )
 
     cdef LogGuard log_guard = LogGuard.__new__(LogGuard)
     log_guard._mem = log_guard_api
