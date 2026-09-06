@@ -183,6 +183,11 @@ cdef extern from "../includes/common.h":
     # It implements the `Deref` trait, allowing instances of `LogGuard_API` to be
     # dereferenced to `LogGuard`, providing access to `LogGuard`'s methods without
     # having to manually access the underlying `LogGuard` instance.
+    #
+    # The inner pointer is nullable: `logging_init` returns a null guard when the
+    # logging subsystem cannot be re-initialized (see its docs). `Option<Box<T>>`
+    # is guaranteed to use the null-pointer representation, so the C layout is
+    # still a single `struct LogGuard *`.
     cdef struct LogGuard_API:
         LogGuard *_0;
 
@@ -463,7 +468,13 @@ cdef extern from "../includes/common.h":
     #
     # # Panics
     #
-    # Panics if initializing the Rust logger fails.
+    # Panics if the component log levels cannot be parsed, or if initializing the
+    # Rust logger fails for any reason other than re-initialization.
+    #
+    # Returns a null guard (rather than panicking) when the logging subsystem
+    # cannot be re-initialized after a previous `LogGuard` was dropped: the `log`
+    # crate's global logger can only be set once per process, so this is a normal
+    # outcome for a second kernel in the same process, not a fault.
     LogGuard_API logging_init(TraderId_t trader_id,
                               UUID4_t instance_id,
                               LogLevel level_stdout,

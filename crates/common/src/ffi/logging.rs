@@ -46,22 +46,27 @@ use crate::{
 /// It implements the `Deref` trait, allowing instances of `LogGuard_API` to be
 /// dereferenced to `LogGuard`, providing access to `LogGuard`'s methods without
 /// having to manually access the underlying `LogGuard` instance.
+///
+/// The inner pointer is nullable: `logging_init` returns a null guard when the
+/// logging subsystem cannot be re-initialized (see its docs). `Option<Box<T>>`
+/// is guaranteed to use the null-pointer representation, so the C layout is
+/// still a single `struct LogGuard *`.
 #[repr(C)]
 #[derive(Debug)]
 #[allow(non_camel_case_types)]
-pub struct LogGuard_API(Box<LogGuard>);
+pub struct LogGuard_API(Option<Box<LogGuard>>);
 
 impl Deref for LogGuard_API {
     type Target = LogGuard;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0.as_ref().expect("LogGuard_API is null")
     }
 }
 
 impl DerefMut for LogGuard_API {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        self.0.as_mut().expect("LogGuard_API is null")
     }
 }
 
@@ -85,7 +90,13 @@ impl DerefMut for LogGuard_API {
 ///
 /// # Panics
 ///
-/// Panics if initializing the Rust logger fails.
+/// Panics if the component log levels cannot be parsed, or if initializing the
+/// Rust logger fails for any reason other than re-initialization.
+///
+/// Returns a null guard (rather than panicking) when the logging subsystem
+/// cannot be re-initialized after a previous `LogGuard` was dropped: the `log`
+/// crate's global logger can only be set once per process, so this is a normal
+/// outcome for a second kernel in the same process, not a fault.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn logging_init(
     trader_id: TraderId,
@@ -141,10 +152,16 @@ pub unsafe extern "C" fn logging_init(
         logging_set_bypass();
     }
 
-    LogGuard_API(Box::new(
-        init_logging(trader_id, instance_id, config, file_config)
-            .expect("Failed to initialize logging"),
-    ))
+    match init_logging(trader_id, instance_id, config, file_config) {
+        Ok(guard) => LogGuard_API(Some(Box::new(guard))),
+        // Re-initialization only: the `log` crate refuses a second
+        // `set_boxed_logger`. Hand back a null guard and let the caller decide;
+        // the Cython layer turns it into `LoggingReinitError`.
+        Err(e) if e.downcast_ref::<log::SetLoggerError>().is_some() => LogGuard_API(None),
+        // Any other failure (e.g. the log thread failing to spawn) is a real
+        // fault on first initialization and stays as loud as it is today.
+        Err(e) => panic!("Failed to initialize logging: {e:?}"),
+    }
 }
 
 /// Creates a new log event.
