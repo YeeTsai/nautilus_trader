@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -355,11 +356,23 @@ def _copy_build_dir_to_project(cmd: build_ext) -> None:
         if not Path(output).exists():
             continue
 
-        # Copy the file and set permissions
-        shutil.copyfile(output, relative_extension)
-        mode = relative_extension.stat().st_mode
-        mode |= (mode & 0o444) >> 2
-        relative_extension.chmod(mode)
+        # Write beside the target and rename into place. A running process may
+        # have the current file mmapped, and rewriting it in place faults that
+        # process (SIGBUS on Linux); rename(2) is atomic and leaves the old
+        # inode alive for whoever still maps it.
+        tmp = relative_extension.with_name(relative_extension.name + ".tmp")
+        try:
+            shutil.copyfile(output, tmp)
+            # Keep the mode the destination would have ended up with: the
+            # existing file's when it is being replaced, the fresh temp file's
+            # otherwise.
+            source = relative_extension if relative_extension.exists() else tmp
+            mode = stat.S_IMODE(source.stat().st_mode)
+            mode |= (mode & 0o444) >> 2
+            tmp.chmod(mode)
+            os.replace(tmp, relative_extension)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     print("Copied all compiled dynamic library files into source")
 
@@ -369,7 +382,17 @@ def _copy_rust_dylibs_to_project() -> None:
     ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
     src = Path(CARGO_TARGET_DIR) / f"{RUST_LIB_PFX}nautilus_pyo3.{RUST_DYLIB_EXT}"
     dst = Path("nautilus_trader/core") / f"nautilus_pyo3{ext_suffix}"
-    shutil.copyfile(src=src, dst=dst)
+    # Atomic replace, same reason as in _copy_build_dir_to_project. No mode
+    # adjustment here: copying onto an existing file kept its mode, so preserve
+    # exactly that and nothing more.
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        shutil.copyfile(src=src, dst=tmp)
+        if dst.exists():
+            tmp.chmod(stat.S_IMODE(dst.stat().st_mode))
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
 
     print(f"Copied {src} to {dst}")
 
@@ -485,17 +508,27 @@ def _strip_unneeded_symbols() -> None:
             size_before = so.stat().st_size
             total_before += size_before
 
+            # Strip into a sibling and rename in: stripping in place rewrites a
+            # file that a running process may have mapped, which kills it just
+            # as the copies above would.
+            tmp = so.with_name(so.name + ".tmp")
             if IS_LINUX:
-                strip_cmd = ["strip", "--strip-all", "-R", ".comment", "-R", ".note", so]
+                strip_cmd = ["strip", "--strip-all", "-R", ".comment", "-R", ".note", "-o", tmp, so]
             elif IS_MACOS:
-                strip_cmd = ["strip", "-x", so]
+                strip_cmd = ["strip", "-x", "-o", tmp, so]
             else:
                 raise RuntimeError(f"Cannot strip symbols for platform {platform.system()}")
-            subprocess.run(
-                strip_cmd,  # type: ignore [arg-type]
-                check=True,
-                capture_output=True,
-            )
+            try:
+                subprocess.run(
+                    strip_cmd,  # type: ignore [arg-type]
+                    check=True,
+                    capture_output=True,
+                )
+                # strip -o creates a new file, which does not inherit the mode.
+                tmp.chmod(stat.S_IMODE(so.stat().st_mode))
+                os.replace(tmp, so)
+            finally:
+                tmp.unlink(missing_ok=True)
 
             size_after = so.stat().st_size
             total_after += size_after
